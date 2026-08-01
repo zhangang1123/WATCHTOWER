@@ -1,0 +1,51 @@
+name: 持续集成
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 配置 Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.x'
+          cache: true
+
+      - name: Go 单元测试
+        run: go test ./...
+
+      - name: 配置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Python 静态编译检查
+        run: |
+          python -m pip install -r requirements.txt
+          python -m compileall -q brain proto scripts
+
+      - name: 构建后端并执行端到端闭环测试
+        run: |
+          mkdir -p bin
+          go build -o bin/gateway ./cmd/gateway
+          go build -o bin/mock-infra ./cmd/mock-infra
+          python scripts/e2e_test.py
+
+      - name: 配置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: 前端依赖与生产构建
+        working-directory: web
+        run: |
+          npm ci
+          npm run build

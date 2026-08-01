@@ -1,0 +1,61 @@
+syntax = "proto3";
+package watchtower;
+
+option go_package = "watchtower-lite/proto";
+
+service DiagnosisService {
+    // 触发 Agent 诊断
+    rpc Diagnose(DiagnoseRequest) returns (DiagnoseResponse);
+
+    // 流式诊断过程（实时展示 Agent 的调查步骤）
+    rpc DiagnoseStream(DiagnoseRequest) returns (stream DiagnosisStep);
+
+    // 健康检查
+    rpc HealthCheck(HealthRequest) returns (HealthResponse);
+}
+
+message DiagnoseRequest {
+    string incident_id = 1;
+    string service = 2;
+    string alert_description = 3;
+    string severity = 4;
+    map<string, string> alert_labels = 5;
+    repeated string related_alerts = 6;
+    int64 alert_timestamp = 7;
+}
+
+message DiagnoseResponse {
+    string incident_id = 1;
+    string root_cause = 2;
+    float confidence = 3;
+    repeated Evidence evidence = 4;
+    string suggested_fix = 5;
+    bool auto_fixable = 6;
+    repeated DiagnosisStep diagnosis_path = 7;
+    bool escalated = 8;
+    string summary = 9;
+    // 机器可读的修复动作类型；suggested_fix 仅用于展示。
+    string fix_type = 10;
+}
+
+message DiagnosisStep {
+    int64 step_number = 1;
+    string thought = 2;
+    string action = 3;
+    string observation = 4;
+    int64 latency_ms = 5;
+    bool is_final = 6;
+    DiagnoseResponse final_result = 7;
+}
+
+message Evidence {
+    string source = 1;
+    string description = 2;
+    string raw_data = 3;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+    string status = 1;
+}

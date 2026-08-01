@@ -1,0 +1,12 @@
+bin/
+*.exe
+brain/.venv/
+**/__pycache__/
+**/*.pyc
+web/node_modules/
+web/dist/
+.review-go-cache/
+.cache/
+.env
+*.log
+data/

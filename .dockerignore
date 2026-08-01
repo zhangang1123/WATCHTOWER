@@ -1,0 +1,12 @@
+.git
+.review-go-cache
+.cache
+bin
+*.exe
+brain/.venv
+**/__pycache__
+**/*.pyc
+web/node_modules
+web/dist
+.env
+*.log
