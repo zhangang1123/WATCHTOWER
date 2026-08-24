@@ -3,12 +3,10 @@
 SRE Agent - ReAct 推理引擎
 Think -> Act -> Observe -> 循环直到定位根因
 """
-import os
 import json
-import asyncio
 import re
 import time
-from typing import Dict, List, Any, Optional, AsyncGenerator
+from typing import Dict, Any, Optional, AsyncGenerator
 
 import httpx
 
@@ -30,6 +28,7 @@ class SREAgent:
         llm_timeout: int = 30,
         llm_max_tokens: int = 1200,
         max_iterations: int = 10,
+        history_similarity_threshold: float = 0.78,
     ):
         self.llm_model = llm_model
         self.api_key = api_key
@@ -40,6 +39,7 @@ class SREAgent:
         self.llm_timeout = llm_timeout
         self.llm_max_tokens = llm_max_tokens
         self.max_iterations = max_iterations
+        self.history_similarity_threshold = max(0.0, min(history_similarity_threshold, 1.0))
         mode = f"{llm_provider}/{llm_model}" if self.llm_enabled else "rule fallback"
         print(f"[Agent] reasoning mode: {mode}")
 
@@ -47,20 +47,19 @@ class SREAgent:
         """单次诊断：ReAct 循环推理"""
         print(f"[Agent] Diagnosing incident: {incident['id']} - {incident['description']}")
 
-        # 第1步：检索相似历史故障
-        similar = await self._check_history(incident)
-        if similar and similar.get("similarity", 0) > 0.85:
-            print(f"[Agent] Found similar incident with similarity {similar['similarity']:.2f}")
-            return self._adapt_historical(similar, incident)
-
-        # 第2步：ReAct 循环推理
         context = {
             "incident": incident,
             "thoughts": [],
             "observations": [],
             "steps": [],
             "display_steps": [],
+            "historical_cases": [],
         }
+
+        history_step, similar = await self._retrieve_history(incident)
+        context["display_steps"].append(history_step)
+        if similar.get("accepted_as_context"):
+            context["historical_cases"] = similar.get("matches", [])
 
         for iteration in range(self.max_iterations):
             # Think: 决定下一步查什么
@@ -111,7 +110,7 @@ class SREAgent:
             "auto_fixable": False,
             "escalated": True,
             "summary": "诊断步数超限，建议人工介入",
-            "diagnosis_path": context["steps"],
+            "diagnosis_path": context.get("display_steps", context["steps"]),
         }
 
     async def diagnose_stream(self, incident: Dict[str, Any]) -> AsyncGenerator[Dict[str, Any], None]:
@@ -122,7 +121,14 @@ class SREAgent:
             "observations": [],
             "steps": [],
             "display_steps": [],
+            "historical_cases": [],
         }
+
+        history_step, similar = await self._retrieve_history(incident)
+        context["display_steps"].append(history_step)
+        if similar.get("accepted_as_context"):
+            context["historical_cases"] = similar.get("matches", [])
+        yield {"is_final": False, **history_step}
 
         for iteration in range(self.max_iterations):
             thought = await self._think(context)
@@ -183,7 +189,7 @@ class SREAgent:
             "auto_fixable": False,
             "escalated": True,
             "summary": "诊断步数超限",
-            "diagnosis_path": context["steps"],
+            "diagnosis_path": context.get("display_steps", context["steps"]),
         }
         yield {
             "is_final": True,
@@ -196,8 +202,40 @@ class SREAgent:
     async def _check_history(self, incident: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """检查历史故障模式"""
         if "similar_incidents" in self.tools:
-            return await self.tools["similar_incidents"].run(incident["description"])
-        return None
+            query = (
+                f"服务：{incident.get('service', '')}\n"
+                f"严重级别：{incident.get('severity', '')}\n"
+                f"故障描述：{incident.get('description', '')}"
+            )
+            return await self.tools["similar_incidents"].run(query, top_k=3)
+        return {"found": False, "retrieval_mode": "disabled"}
+
+    async def _retrieve_history(self, incident: Dict[str, Any]) -> Any:
+        """检索相似案例并生成可展示的工具追踪；历史案例只作参考，不直接授予执行权。"""
+        started = time.perf_counter()
+        result = await self._check_history(incident) or {"found": False}
+        similarity = float(result.get("similarity", 0) or 0)
+        result["threshold"] = self.history_similarity_threshold
+        result["accepted_as_context"] = bool(result.get("found")) and similarity >= self.history_similarity_threshold
+        step = {
+            "thought": "先通过 Embedding 向量检索查找相似历史故障，作为本次诊断的参考信息。",
+            "action": "tool:similar_incidents",
+            "observation": json.dumps(
+                {
+                    "trace_type": "tool",
+                    "tool_name": "similar_incidents",
+                    "input": {
+                        "service": incident.get("service", ""),
+                        "description": incident.get("description", ""),
+                        "top_k": 3,
+                    },
+                    "output": result,
+                },
+                ensure_ascii=False,
+            ),
+            "latency_ms": int((time.perf_counter() - started) * 1000),
+        }
+        return step, result
 
     async def _think(self, context: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -243,6 +281,7 @@ class SREAgent:
         payload_context = {
             "incident": context["incident"],
             "previous_steps": context["steps"][-5:],
+            "similar_historical_cases": context.get("historical_cases", []),
             "available_tools": {
                 "prometheus_query": {"query": "PromQL string"},
                 "k8s_get_events": {"namespace": "service namespace"},
@@ -555,23 +594,21 @@ class SREAgent:
         # 填充服务名
         service = incident.get("service", "service")
         matched["suggested_fix"] = matched["suggested_fix"].replace("{service}", service)
+        historical_cases = context.get("historical_cases", [])
+        if historical_cases:
+            best = historical_cases[0]
+            matched["evidence"] = list(matched.get("evidence", []))
+            matched["evidence"].append({
+                "source": "history_embedding",
+                "description": (
+                    f"Embedding 检索命中历史案例 {best.get('case_id', '')}，"
+                    f"余弦相似度 {float(best.get('similarity', 0)):.2f}；仅作为诊断参考。"
+                ),
+                "raw_data": json.dumps(best, ensure_ascii=False),
+            })
         matched["diagnosis_path"] = context.get("display_steps", context["steps"])
         if not matched.get("summary"):
             matched["summary"] = f"总结结论：{matched['root_cause']}"
         matched["escalated"] = not matched["auto_fixable"]
 
         return matched
-
-    def _adapt_historical(self, similar: Dict[str, Any], incident: Dict[str, Any]) -> Dict[str, Any]:
-        """复用历史诊断"""
-        return {
-            "root_cause": similar.get("root_cause", ""),
-            "confidence": similar.get("similarity", 0.0),
-            "evidence": [{"source": "历史记录", "description": f"发现相似历史事件，相似度为 {similar.get('similarity', 0):.2f}"}],
-            "suggested_fix": similar.get("fix_plan", ""),
-            "fix_type": similar.get("fix_type", ""),
-            "auto_fixable": True,
-            "summary": f"总结结论：已匹配到历史故障，根因为：{similar.get('root_cause', '')}",
-            "diagnosis_path": [],
-            "escalated": False,
-        }

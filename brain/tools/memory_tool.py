@@ -21,9 +21,25 @@ class SimilarIncidentTool(BaseTool):
                 return {
                     "found": True,
                     "similarity": best.get("similarity", 0),
+                    "retrieval_mode": best.get("retrieval_mode", "unknown"),
+                    "embedding_model": best.get("embedding_model", ""),
+                    "case_id": best.get("id", ""),
+                    "description": best.get("description", ""),
                     "root_cause": best.get("root_cause", ""),
                     "fix_plan": best.get("fix_plan", ""),
+                    "fix_type": best.get("fix_type", ""),
                     "previous_diagnosis": best.get("diagnosis_path", []),
+                    "matches": [
+                        {
+                            "case_id": item.get("id", ""),
+                            "description": item.get("description", ""),
+                            "root_cause": item.get("root_cause", ""),
+                            "fix_plan": item.get("fix_plan", ""),
+                            "fix_type": item.get("fix_type", ""),
+                            "similarity": item.get("similarity", 0),
+                        }
+                        for item in results
+                    ],
                 }
             return {"found": False}
         except Exception as e:

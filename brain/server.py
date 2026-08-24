@@ -15,13 +15,13 @@ from agent import SREAgent
 from tools.prometheus_tool import PrometheusTool
 from tools.k8s_tool import K8sEventsTool, K8sLogsTool
 from tools.memory_tool import SimilarIncidentTool
-from memory.vector_store import MemoryVectorStore
+from memory.vector_store import MemoryVectorStore, OpenAIEmbeddingProvider
 
 # Import generated proto
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import proto.diagnosis_pb2 as diagnosis_pb2
 import proto.diagnosis_pb2_grpc as diagnosis_pb2_grpc
-from config import get_bool, get_int, load_config
+from config import get_bool, get_float, get_int, load_config
 
 load_config()
 
@@ -38,11 +38,33 @@ class DiagnosisServicer(diagnosis_pb2_grpc.DiagnosisServiceServicer):
         mock_prometheus_url = os.getenv("MOCK_PROMETHEUS_URL", "http://localhost:9090")
         mock_k8s_url = os.getenv("MOCK_K8S_URL", "http://localhost:8081")
 
+        embedding_api_key = os.getenv("EMBEDDING_API_KEY") or os.getenv("DASHSCOPE_API_KEY", "")
+        embedding_base_url = os.getenv("EMBEDDING_BASE_URL", "")
+        embedding_enabled = (
+            get_bool("EMBEDDING_ENABLED", True)
+            and bool(embedding_api_key)
+            and bool(embedding_base_url)
+        )
+        embedding_provider = None
+        if embedding_enabled:
+            embedding_provider = OpenAIEmbeddingProvider(
+                api_key=embedding_api_key,
+                base_url=embedding_base_url,
+                model=os.getenv("EMBEDDING_MODEL", "qwen3.7-text-embedding"),
+                timeout=get_int("EMBEDDING_TIMEOUT_SECONDS", 30),
+            )
+
+        vector_store = MemoryVectorStore(
+            embedding_provider=embedding_provider,
+            keyword_fallback=get_bool("EMBEDDING_KEYWORD_FALLBACK", True),
+        )
+        print(f"[Brain] history retrieval mode: {vector_store.mode}")
+
         tools = {
             "prometheus_query": PrometheusTool(mock_prometheus_url),
             "k8s_get_events": K8sEventsTool(mock_k8s_url),
             "k8s_get_logs": K8sLogsTool(mock_k8s_url),
-            "similar_incidents": SimilarIncidentTool(MemoryVectorStore()),
+            "similar_incidents": SimilarIncidentTool(vector_store),
         }
 
         self.agent = SREAgent(
@@ -55,6 +77,7 @@ class DiagnosisServicer(diagnosis_pb2_grpc.DiagnosisServiceServicer):
             llm_timeout=get_int("LLM_TIMEOUT_SECONDS", 30),
             llm_max_tokens=get_int("LLM_MAX_TOKENS", 1200),
             max_iterations=get_int("AGENT_MAX_ITERATIONS", 10),
+            history_similarity_threshold=get_float("EMBEDDING_SIMILARITY_THRESHOLD", 0.78),
         )
 
     async def Diagnose(self, request, context):
